@@ -27,6 +27,22 @@ class InfraConfig:
 
 infra_config = InfraConfig()
 
+# ValueError: mutable default <class ('app.shared.config.embedding_config'
+#                                     '.EmbeddingConfig')> for field embedding_config
+# is not allowed: use default_factory
+
+
+# @dataclass / pydantic BaseModel -> 直接给对象的属性默认值 -> 默认值 引用类型 对象 dict list -> 报错 is not allowed: use default_factory
+# 原因: 多个属性指向同一个对象,修改以后互相影响不安全!
+# 解决: 1. 自己创建一个新的对象 copy  new()  2. 绕开 default_factory = 没有参数函数 期望的返回新的对象 实时不检查 lambda [没有参数] : 对象
+
+# 原因: 属性的默认值是对象 embedding_config 对象是一个引用数据类型!!
+# [影响我们] infra_config. embedding_config [修改了]  => 配置对象 <= [修改了] embedding_config.embedding_config.py [影响对方]
+
+# 解决1: import copy copy.deep_copy() -> 全新的对象
+# 解决2: field(default_factory= embedding_factory()函数->创建一个'新对象')  事实上,他是提供了格式,并不会真的监督!
+
+
 
 
 
