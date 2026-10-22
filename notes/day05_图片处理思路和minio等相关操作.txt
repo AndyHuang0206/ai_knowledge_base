@@ -1,0 +1,388 @@
+一. pdf图片处理节点node_md_img
+  节点作用:
+     让图片正常参与到多模态RAG流程中!  让图片有文本含义,给模型的时候,可以提供一些回答依据!
+     现在: ![](/images/xxx.png)  -> ![图片的含义 视觉模型进行识别vlm](网络地址 本地图片 -> 文件服务器)
+     宏观: md_content  xxxx![]()xxxxx![]()   -> 新的md xxxx![含义](网络地址)xxxxx![含义](网络地址) -> md_path / md本地文件信息
+     目标: 对md内部特殊组成部分进行独立处理!! pdf -> md -> 图片 表格 ....
+     前提: 图片识别 需要图片内容(base64) 还需要图片的上下文信息
+  节点参数: state
+     传入:
+          md_path  task_id
+     生成:
+          md_path -> 新的md文件 文件名.md  文件名_new.md
+          md_content -> 新的md内容
+  节点步骤:
+     准备: 修改config.添加常量
+        # 图片上下文的长度,约定100个字符
+        IMAGE_CONTEXT_CHAR_LENGTH = 100
+        SUPPORTED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
+     1. 获取核心参数和数据校验
+        目标: state 获取: md_path_obj images_path_obj md_content
+        validates_and_get_data(state:ImportGraphState) -> tuple[str,Path,Path]
+        1.1 获取md_path参数从state
+        1.2 md_path的非空校验
+        1.3 转成md_path_obj Path对象,做存在性校验! is_file()
+        1.4 使用md_path对象读取md_content,更新state
+        1.5 md_path_obj可以获取images path地址
+        1.6 顺序返回 return md_content,..
+     2. 读取md中使用图片的信息 上下文和图片的本身路径
+        从images中获取图片地址(Path),使用正则在md_content中查找和匹配,匹配到以后,获取上下文信息
+        传递: images_path_obj  md_content  获取: 图片名 Path.name  图片Path对象  图片上文 图片下文   [(图片名字str,图片Path对象,(上文,下文))]
+        scan_images_info(images_path_obj:Path,md_content:str) -> list[tuple[str,Path,tuple[str,str]]]
+        2.1 获取images下的所有图片Path对象 [列表/生成器]
+        2.2 循环每一张图片对象
+            2.2.1 定义这个图片的正则规则
+            2.2.2 使用正则到md_content中进行匹配
+            2.2.3 检查是否匹配 Match是否为空
+            2.2.4 获取对应上下信息
+            2.2.5 组装当前的数据元组 (图片名字str,图片Path对象,(上文,下文)) 添加到大的列表
+        2.3 返回列表数据   [(str,Path,(str,str))]
+     3. 使用vlm进行图片的意图识别  图片 = 意图  dict {图片的名字.xx : 意图 , 图片的名字.xx : 意图}
+        使用视觉模型识别图片的含义!最终返回图片含义的dict(key => 图片名 / value => 含义)
+        summary_image_info(image_info:list[tuple[str,Path,tuple[str,str]]]) -> dict[str,str]
+        3.1 数据准备工作 初始化一个视觉模型对象 | 定义一个接收数据的字典
+        3.2 循环处理每一张图片    for str,Path,context in  list[tuple[str,Path,tuple[str,str]]]
+            3.3 封装模型提示词信息
+            3.4 封装调用链: 直接 model.invoke | 调用链 提示词 | 模型 | 解析器 OutParser()
+            3.5 使用调用链进行调用和获取结果
+            3.6 添加到字典中 {image_name,image_summary}
+        3.7 跳出循环->返回整体字典
+     4. 图片上传到文件服务器获取服务器中网络地址  图片 = 网络地址 dict {图片的名字: 網絡地址 , 图片的名字: 網絡地址 }
+        将图片传递到文件服务器,获取图片的网络地址信息! 最终返回也是一个dict(key=>图片名,value=>网络地址)
+        upload_image_to_minio(image_info:list[tuple[str,Path,tuple[str,str]]],stem) -> dict[str,str]:
+        4.1 前置准备工作 获取minio_client / 创建一个存储结果的dict
+        4.2 根据桶信息查询对应旧图片对象
+        4.3 批量删除旧图片对象
+        4.4 循环处理每一张图片  for image_name,image_path_obj,_ in image_info:
+            4.5 单次循环的异常处理,失败,跳过图片即可,进行下一张!
+            4.6 调用minio_client.fput方法将图片上传到minio服务器
+            4.7 根据信息调用infra构建图片的访问地址
+            4.8 将图片访问地址存储到dict image_name | image_url
+        4.9 最终返回dict数据
+     5. 完成md_content内部图片标签的替换,获得新的md_content内容
+        目标: md_content内容进行替换 返回替换后的md_content ![](./) -> ![网络地址](http...)
+        replace_old_md_content(md_content:str,images_url:dict[str,str],images_summary:dict[str,str]) -> str:
+        5.1 循环images_url可以获取每张图片的image_name / 网络地址
+        5.2 可以根据image_name去images_summary获取对应的summary描述
+        5.3 定义提前编译查询原有图片标签的正则 re.compile(r"\!\[.*?\]\(.*?"+re.escape(image_name)+".*?\)"
+        5.4 使用正则的替换函数即可    替换后的内容 md_content  =  编译的对象.sub("替换入的内容" f"![summary](url)" ,"什么中查找替换" -> md_content)
+        5.5 返回替换后的md_content
+     6. 将新md_content写到本地磁盘,持久化
+        目标: 文件名/文件名.md [old] 新的md_content->写到本地磁盘!!  文件名_new.md,最终返回一个新的md_path:str
+        backup_md_return_path(md_content:str,md_path_obj:Path)
+        6.1 获取新备份位置的Path 文件名_new.md  md_path_obj.with_name | rename
+        6.2 向新的path对象写入新的md_content md_path_obj.write_text
+        6.3 新的path对象转成字符串返回即可
+     7. 更新state信息md_path -> 新的地址  md_content -> 新的内容
+        state['md_path'] = 新地址
+        state['md_content'] = 新content内容
+     8. 返回state
+        return state
+
+  节点技术:
+     1. re正则使用回顾
+        1.1 import re
+        1.2 正则定义
+            r" \n 元字符 + 字面字符 \元字符"
+        1.3 正则使用
+            先编译    正则对象 = re.compile(r"正则规则")   正则对象.正则方法(不用写正则,...)
+            即时使用   re.正则方法(r"正则规则",....)
+        1.4 正则匹配方法
+            字符串 元字符 + \ = escape(字符串)
+            search  -> 第一个匹配项   .group() .span() .start() .end()
+            match   -> 从头开始匹配
+            finditer-> 找到所有匹配项
+            findall -> 找到所有匹配内容
+        1.5 特殊元字符
+            () -> 局部提取 ->  问题 ->  chunks - > ![语义](网络地址)
+            ?  -> 是否贪婪匹配 ? 非贪婪 不加贪婪   .* -> ?
+     2. 模型(model)工具类解读和infra编写
+        2.1 解读下模型工具类
+            app/shared/mode/lm_utils.py -> 加载视觉和大语言模型 -> 工具类会带有缓存的能力 -> dict[tuple[str,bool],OpenAi]
+            get_llm_client(model: str | None = None -> 大语言模型可以不用传递, json_mode: bool = False -> 大语言模型才有json)
+            llm_client = ChatOpenAI(
+                model=target_model,  # 目标模型名
+                temperature=lm_config.llm_temperature or _DEFAULT_TEMPERATURE,  # 低温度保证输出确定性（0~1）
+                api_key=lm_config.api_key,  # API密钥
+                base_url=lm_config.base_url,  # API基础地址（适配国产模型代理地址）
+                extra_body=extra_body,      # 定义当前类没有声明的非openapi标准的参数 国产模型的参数..
+                model_kwargs=model_kwargs,  # 定义当前类中没有声明的openapi标准的参数 例如: model_kwargs = {"openapi的参数":值}
+            )
+        2.2 封装模型快速调用门面infra
+            infra统一面门, 为了简化我们代码使用自己的工具类
+
+            大语言模型
+            视觉模型
+                         --> infra/llm/providers/ 一个类  四个方法  -> shared/model/三个工具类
+            嵌入式模型
+            重排序模型
+
+            from app.shared.model.lm_utils import get_llm_client
+            from app.infra.config.providers import infra_config
+
+
+            class LLMProvider():
+
+                # 大语言模型
+                def chat(self,model:str|None = None,json_model:bool = False):
+                    return get_llm_client(model=model,json_mode=json_model)
+
+                # 视觉模型
+                def vision_chat(self,model:str|None = None):
+                    if not model:
+                        model = infra_config.lm_config.lv_model
+                    return get_llm_client(model=model,json_mode=False)
+
+                # ------------ 后续修改扩展 ----------
+                # 嵌入式模型
+
+                # 重排序模型
+
+            llm_provider = LLMProvider()
+
+     3. base64和vlm视觉模型传递数据
+        我们   -> 图片 -> vlm视觉模型
+        model.invoke([SystemMessage(content="xx") , HumanMessage(content="xx")])
+
+        3.1 视觉模型对象调用传参问题
+          message = HumanMessage(
+                content=[
+                    {"type": "text", "text": "describe the weather in this image"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "图片的网络地址 http://"},
+                        "image_url": {"url": f"data:图片的mimetype类型;base64,图片的base64字符串"},
+                    },
+                ]
+          )
+
+          mimetype -> 识别文件的标准类型 -> 视觉模型 -> 文件的格式
+          mimetype -> 邮件多附件类型... -> 国际组织 -> 标准文件类型 -> 大类型/小类型
+          发送者 -> 文件类型 ------------------ 接收者 -> 文件类型 -> 合适的软件 -> 打开
+
+          from mimetypes import guess_type
+
+          # (mimetype类型,压缩格式) = guess_type(文件名称,必须带有后缀名)
+          print(guess_type(image_name)[0])
+          print(guess_type(video_name)[0])
+
+        3.2 base64转码方式
+          base64不是加密技术,就是一种转码技术! 可以将二进制(字节数据)转成ascii字符串! (转码 二进制 -> 字符串 / 反转 字符串 -> 二进制)
+          常用于使用字符串的形式传递文件数据!
+          例如: 1. 向视觉模型传递图片! 图片-> base64-> 字符串 2. 接口返回一张验证码图片
+          import base64
+
+          字节数据转成字符串:  转后的字符串 = base64.b64encode(字节数据).decode(编码格式)
+          字符串转成字节数据:  字节数据    = base64.b64decode(base64字符串)
+
+     4. minio文件服务器使用和infra编写
+       4.1 文件服务器的使用和分类
+           公有云: 公共大家都可以使用
+                阿里 腾讯 华为 其他云厂商,提供了文件存储的服务!
+                买文件存储服务器 -> token -> sdk工具类 -> 文件进行操作 -> 简单 | 缺点: 收费
+           私有云: 自己搭建,公司专属
+                服务器 - 文件服务器的软件(minio) : 文件服务器
+           为啥选择minio: 1.性能优异 提供分布式集群  2.提供更便捷的操作,提供可视化页面
+       4.2 搭建一个文件服务器(minio)
+           1. 准备服务器 [云服务器 / 虚拟机中]
+              39.105.7.90
+           2. 安装minio软件
+              基于docker安装:
+                 docker run -d --name minio \
+                    -p 9000 主机端口号 :9000 映射到内置 -p 9001:9001 \  -> minio  9000->代码操作端口  9001 -> 可视化管理页面
+                    -e "MINIO_ROOT_USER=minioadmin" \                -> 账号和密码 minioadmin
+                    -e "MINIO_ROOT_PASSWORD=minioadmin" \
+                    -v $(pwd)/volumes/minio/data:/data \             -> 当前启动文件夹下/volumes/minio/data
+                    quay.io/minio/minio server /data --console-address ":9001"
+                 MinIO 在 **2025 年 5 月之后的社区版** 中，**完全移除了 Web 控制台（9001 端口）的权限管理入口**（包括
+                 Identity、Policies 等菜单），仅保留「文件 / 桶的基础浏览上传功能」，这是官方对社区版的功能精简（商业版仍保留完整控制台权限功能）。
+                 解释: 代码操作,没有任何影响,他只是影响可视化进行权限管理!
+              手动原始方式安装:
+                 1.下载对应的安装包(官网) 2.正常安装即可 3.将软件集成systemd中(1.指定的位置/etc/systemd/system/xxx.service 2.编写启动配置 3.修改配置文件)
+                 systemctl enable 软件名 / 软件名.service
+                 systemctl diable 软件名
+                 systemctl start  软件名
+                 systemctl stop   软件名
+                 systemctl restart软件名
+                 systemctl status 软件名
+       4.3 文件服务器的可视化操作
+           步骤1: 登录 http://39.105.7.90:9001  账号和密码 minioadmin
+           步骤2: 创建一个桶 bucket -> 一个项目对应一个bucket  桶的命名不能添加下划线
+           步骤3: 找到对象浏览 / 选中桶 / upload 上传文件或者文件夹即可
+           步骤4: 端点:9000 + / + 桶名 + / + 对象完整路径
+           访问权限控制理解:
+                                上传文件 <- 图片 <- 我们
+                minio服务器                                默认: 上传和访问都需要权限控制[最基础单位是桶]
+                                访问文件 -> 图片 -> 我们
+
+                默认场景是否合理? 上传需要认证权限 合理: 因为上传的文件需要占有服务器的存储资源
+                                访问需要认证权限  开发维度下,一般访问不需要做数据认证(图片防盗链)
+                修改桶的权限控制:  private [上传+访问都需要校验] public[都不需要校验] custom[自定义校验权限]
+                                https://www.minio.org.cn/docs/minio/linux/developers/python/API.html#set_bucket_policy
+                                {
+                                    "Version": "2012-10-17",
+                                    "Statement": [
+                                        {
+                                            "Effect": "Allow",
+                                            "Principal": {
+                                                "AWS": [
+                                                    "*"
+                                                ]
+                                            },
+                                            "Action": [
+                                                "s3:GetObject"
+                                            ],
+                                            "Resource": [
+                                                "arn:aws:s3:::ai-0812/*"
+                                            ]
+                                        }
+                                    ]
+                                }
+            小任务: 每个人在我的服务器中创建一个0812-名字拼音的桶名,设置自定义权限,传递一张你最喜欢的图片,浏览器访问截图发到内网通中!!!
+       4.4 使用python api进行文件服务器的操作
+           https://www.minio.org.cn/docs/minio/linux/developers/python/API.html
+           步骤1: 进行minio服务器的'登录' '创建一个minio的操作客户端'
+                  minio_client =  Minio(endpoint,  -> 我们要连接到哪个minio的服务器   ip地址:9000 例如: 39.105.7.90:9000
+                                       access_key=None,  账号  minioadmin
+                                       secret_key=None,  密码  minioadmin
+                                       secure=True)      是否进行加密: True ->  https://39.105.7.90:9000  || False -> http://39.105.7.90:9000
+           步骤2: 创建bucket
+                  minio_client.make_bucket(bucket_name=桶名)
+           步骤3: 修改bucket的权限
+                  minio_client.set_bucket_policy(bucket_name=桶名, policy=权限字符串)
+           步骤4: bucket内部的文件操作
+                 上传文件
+                      put_object(bucket_name, object_name = 文件名 例如: images/55.png,
+                                 data => 要上传文件的字节数据 , content_type=mimetype类型)
+                      fput_object(bucket_name, object_name = 文件名 例如: images/55.png,
+                                 filepath =>上传文件地址 , content_type=mimetype类型)
+                 查看文件
+                      list_objects(bucket_name=>桶名, prefix=None 查看桶下的所有文件 | /xx 查看xx下的文件 , recursive=False 是否递归查询
+                 删除文件
+                      remove_objects(bucket_name, delete_object_list => 要删除的对象列表
+                 更新文件: 删除+上传
+           步骤5: 图片的访问地址如何获取? 自己拼接
+                 endpoint / bucket_name / object_name
+       4.5 解读minio的文件服务器的工具类 [1 - 2 - 3]
+           位置: app/shared/clients/minio_utils.py  登录->创建桶->设置权限->对外暴漏一个minio_client
+           1全局属性 + 4个方法 [3 准备方法 + 1 对外方法 ]
+           1全局属性是为了缓存minio_client对象
+           3个准备方法 3.1 连接minio客户端Minio(4个参数..) 3.2 设置权限的字符串 dict / 桶 / json.dumps(dict) 3.3 判断桶是否存在,不存在创建并设置权限字符串
+           1对外方法 get_minio_client() -> 串联3个方法 并且返回1全局属性 [第一次不走缓存/后续走缓存...]
+       4.6 封装minio文件服务器的infra公共类
+           位置: app/infra/object_storage/minio_gateway.py
+           解读: 4个方法  1. 返回桶名 2.返回图片文件夹前缀  3.返回minio客户端对象 -> @property  4.拼接访问地址
+           配置: .env
+                #minio客户端
+                MINIO_ENDPOINT=39.105.7.90:9000  <- 修改ip地址
+                MINIO_ACCESS_KEY=minioadmin      <- 账号
+                MINIO_SECRET_KEY=minioadmin      <- 密码
+                MINIO_BUCKET_NAME=knowledge-base-files <- 桶名字  knowledge-base-files-zwf
+                MINIO_IMG_DIR=/upload-images     <- 图片的前缀images
+                MINIO_SECURE=False               <- 文件服务器有没有加密处理 https / http
+
+           理解: 向桶中传入的对象,并不是第一层直接放图片! 因为这样做,后续不方便区分图片的来源(文件)
+                设计图片要隶属于某个文件夹,这样就可以根据文件夹进行批量查询和处理!
+
+                初步:
+                    桶名
+                       图片的前缀images
+                             文件同名的文件夹1 stem
+                                   图片.png
+                                   图片.png
+                                   图片.png
+                                   图片.png
+                             文件同名的文件夹2 stem
+                                   图片.png
+                                   图片.png
+                                   图片.png
+                                   图片.png
+                       chunks
+                             文件同名的文件夹1
+                                   xxx.json
+
+
+            from minio import Minio
+
+            from app.shared.clients.minio_utils import get_minio_client
+            from app.infra.config.providers import infra_config
+
+
+            class MinIOGateway:
+                """
+                MinIO 对象存储网关类
+                统一封装 MinIO 客户端获取、配置读取、图片URL拼接等能力，
+                供全项目统一调用，避免到处写配置、重复拼接URL
+                """
+
+                # 桶名
+                @property
+                def bucket_name(self) -> str:
+                    """获取 MinIO 存储桶名称（从全局配置读取）"""
+                    return infra_config.minio.bucket_name
+
+                # 图片文件夹前缀
+                @property
+                def image_dir(self) -> str:
+                    """获取 MinIO 中存放图片的目录路径（从全局配置读取）"""
+                    return infra_config.minio.minio_img_dir
+
+                # 获取客户端对象
+                @property
+                def client(self) -> Minio:
+                    """获取 MinIO 客户端实例，用于上传、下载、查询文件等操作"""
+                    return get_minio_client()
+
+                # 构建访问地址 minio_image = 端点 + 桶 + 对象名
+                def build_image_url(self, stem: str, image_name: str) -> str:
+                    """
+                    拼接生成 MinIO 图片的可访问URL（HTTP/HTTPS）
+                    :param stem: 文档名称（不带后缀），用于区分不同文档的图片
+                    :param image_name: 图片原始文件名
+                    :return: 可直接访问的 MinIO 图片完整URL
+                    """
+                    # 根据配置决定使用 http 还是 https
+                    protocol = "https" if infra_config.minio.minio_secure else "http"
+
+                    # 拼接最终可访问的图片在线地址
+                    return (
+                        f"{protocol}://{infra_config.minio.endpoint}/"
+                        f"{self.bucket_name}{self.image_dir}/{stem}/{image_name}"
+                    )
+
+
+            # 创建全局唯一的 MinIO 网关实例，全项目复用
+            minio_gateway = MinIOGateway()
+
+节点总结:
+    1. 正则
+       import re
+       re.compile() / re.sub(0 -> 正则规则,1,2) /  search / match / finditer / findall / () / ?
+       查找图片的上下文信息 |  进行内容替换(lambda _: f"替换入的字符串")
+    2. 模型加载
+       init_chat_model -> OpenAI() [kwargs={openai -> json_object } / extra_body= {非openai 思考模式}]-> 接口
+    3. 多模态模型传递参数问题
+       图片 -> vlm -> HumanMessage(content=[
+            OpenAI -> 2848行
+            {
+              type:text, text:"图片的描述"
+            },
+            {
+              type:image_url,
+              url: "data;mimetype:base64,base64字符串"
+            }
+       ])
+
+       mimetype => from mimetype import guess_type   guess_type(文件名.xx) [0]
+       base64   => import base64  1.直接转成字符串 字符串= base64.b64encode(字节).dcode("utf-8")  2.字符串反转字节  字节= base64.b64decode(字符串)
+
+    4. 文件服务器
+       搭建文件服务器  docker / 手动 / systemd  [了解]  39.105.7.90 root Zhao6429598
+       可视化操作  9001  登录 桶 权限控制 以及访问的规则 端点+桶+对象名
+       代码进行操作 https://www.minio.org.cn/docs/minio/linux/developers/python/API.html#
+       解读minio的工具类 1个属性 4个方法 3(私有) 1(对外)
+       封装了minio的infra -> 粘贴 -> 手写 4个方法  bucket_name  image_dir  client / build_image_url
+
+    5. 项目业务
+
+

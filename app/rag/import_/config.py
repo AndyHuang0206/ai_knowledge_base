@@ -7,3 +7,7 @@ MINERU_POLL_TIMEOUT_SECONDS = 600  # 轮询最大等待时间 minerU -> 每一�
 MINERU_POLL_INTERVAL_SECONDS = 3   # 一次轮询失败了,别立即开启下一次! 间隔等待
 # MinerU 文件下载超时时间（单位：秒），下载文件超过此时长则中断
 MINERU_DOWNLOAD_TIMEOUT_SECONDS = 600
+# 图片上下文字符长度
+IMAGE_CONTEXT_CHAR_LENGTH = 100
+# 支持的图片扩展名
+SUPPORTED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}

@@ -1,0 +1,71 @@
+一. pdf图片处理节点node_md_img
+  节点作用:
+     让图片正常参与到多模态RAG流程中!  让图片有文本含义,给模型的时候,可以提供一些回答依据!
+     现在: ![](/images/xxx.png)  -> ![图片的含义 视觉模型进行识别vlm](网络地址 本地图片 -> 文件服务器)
+     宏观: md_content  xxxx![]()xxxxx![]()   -> 新的md xxxx![含义](网络地址)xxxxx![含义](网络地址) -> md_path / md本地文件信息
+     目标: 对md内部特殊组成部分进行独立处理!! pdf -> md -> 图片 表格 ....
+     前提: 图片识别 需要图片内容(base64) 还需要图片的上下文信息
+  节点参数: state
+     传入:
+          md_path  task_id
+     生成:
+          md_path -> 新的md文件 文件名.md  文件名_new.md
+          md_content -> 新的md内容
+  节点步骤:
+     准备: 修改config.添加常量
+        # 图片上下文的长度,约定100个字符
+        IMAGE_CONTEXT_CHAR_LENGTH = 100
+        SUPPORTED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
+     1. 获取核心参数和数据校验
+        目标: state 获取: md_path_obj images_path_obj md_content
+        validates_and_get_data(state:ImportGraphState) -> tuple[str,Path,Path]
+        1.1 获取md_path参数从state
+        1.2 md_path的非空校验
+        1.3 转成md_path_obj Path对象,做存在性校验! is_file()
+        1.4 使用md_path对象读取md_content,更新state
+        1.5 md_path_obj可以获取images path地址
+        1.6 顺序返回 return md_content,..
+     2. 读取md中使用图片的信息 上下文和图片的本身路径
+        从images中获取图片地址(Path),使用正则在md_content中查找和匹配,匹配到以后,获取上下文信息
+        传递: images_path_obj  md_content  获取: 图片名 Path.name  图片Path对象  图片上文 图片下文   [(图片名字str,图片Path对象,(上文,下文))]
+        scan_images_info(images_path_obj:Path,md_content:str) -> list[tuple[str,Path,tuple[str,str]]]
+        2.1 获取images下的所有图片Path对象 [列表/生成器]
+        2.2 循环每一张图片对象
+            2.2.1 定义这个图片的正则规则
+            2.2.2 使用正则到md_content中进行匹配
+            2.2.3 检查是否匹配 Match是否为空
+            2.2.4 获取对应上下信息
+            2.2.5 组装当前的数据元组 (图片名字str,图片Path对象,(上文,下文)) 添加到大的列表
+        2.3 返回列表数据
+     3. 使用vlm进行图片的意图识别  图片 = 意图  dict {图片的名字.xx : 意图 , 图片的名字.xx : 意图}
+     4. 图片上传到文件服务器获取服务器中网络地址  图片 = 网络地址 dict {图片的名字: 網絡地址 , 图片的名字: 網絡地址 }
+     5. 完成md_content内部图片标签的替换,获得新的md_content内容
+     6. 将新md_content写到本地磁盘,持久化
+     7. 更新state信息md_path -> 新的地址  md_content -> 新的内容
+     8. 返回state
+  节点技术:
+     1. re正则使用回顾
+        1.1 import re
+        1.2 正则定义
+            r" 元字符 + 字面字符 \元字符"
+        1.3 正则使用
+            先编译    正则对象 = re.compile(r"正则规则")   正则对象.正则方法(不用写正则,...)
+            即时使用   re.正则方法(r"正则规则",....)
+        1.4 正则匹配方法
+            字符串 元字符 + \ = escape(字符串)
+            search  -> 第一个匹配项   .group() .span() .start() .end()
+            match   -> 从头开始匹配
+            finditer-> 找到所有匹配项
+            findall -> 找到所有匹配内容
+        1.5 特殊元字符
+            () -> 局部提取 ->  问题 ->  chunks - > ![语义](网络地址)
+            ?  -> 是否贪婪匹配 ? 非贪婪 不加贪婪   .* -> ?
+
+     2. 模型(model)工具类解读和infra编写
+     3. base64和vlm视觉模型传递数据
+     4. minio文件服务器使用和infra编写
+
+今日内容回顾:
+   1. 下载和解压 Path shutil [rmtree / unpack_archive / rename with_name]
+   2. re正则基本使用
+   3. 两个函数 参数校验 图片信息扫描
